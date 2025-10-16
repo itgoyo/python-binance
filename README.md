@@ -36,8 +36,8 @@
 
 1. 克隆项目：
 ```bash
-git clone https://github.com/yourusername/python-binance-monitor.git
-cd python-binance-monitor
+git clone https://github.com/yourusername/python-binance.git
+cd python-binance
 ```
 
 2. 安装依赖：
