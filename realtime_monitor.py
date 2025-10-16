@@ -5,6 +5,7 @@
 实时监控多个交易对的价格变化，支持动态添加交易对和价格排序
 """
 
+import os
 import time
 from datetime import datetime
 from typing import Dict, List
@@ -15,6 +16,7 @@ from rich.table import Table
 from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
+from dotenv import load_dotenv
 
 @dataclass
 class CryptoConfig:
@@ -22,6 +24,8 @@ class CryptoConfig:
     symbol: str
     display_name: str
     usdt_pair: str
+    buy_price: float = 0
+    buy_amount: float = 0
 
     def __post_init__(self):
         if not self.usdt_pair:
@@ -30,24 +34,62 @@ class CryptoConfig:
 class PriceMonitor:
     """价格监控类"""
     
-    # 配置交易对信息
-    CRYPTO_PAIRS = [
-        CryptoConfig("BTC", "比特币", "BTCUSDT"),
-        CryptoConfig("ETH", "以太坊", "ETHUSDT"),
-        CryptoConfig("BNB", "币安币", "BNBUSDT"),
-        CryptoConfig("SOL", "索拉纳", "SOLUSDT"),
-        CryptoConfig("TON", "TON", "TONUSDT"),
-        CryptoConfig("DOGE", "狗狗币", "DOGEUSDT"),
-        CryptoConfig("SUI", "SUI", "SUIUSDT"),
-        CryptoConfig("ASTER", "ASTER", "ASTERUSDT"),
-    ]
-
     def __init__(self):
+        # 加载.env文件
+        load_dotenv()
+        
+        # 配置交易对信息
+        self.CRYPTO_PAIRS = [
+            CryptoConfig(
+                "BTC", "比特币", "BTCUSDT",
+                float(os.getenv('BTC_PRICE', 0)),
+                float(os.getenv('BTC_AMOUNT', 0))
+            ),
+            CryptoConfig(
+                "ETH", "以太坊", "ETHUSDT",
+                float(os.getenv('ETH_PRICE', 0)),
+                float(os.getenv('ETH_AMOUNT', 0))
+            ),
+            CryptoConfig(
+                "BNB", "币安币", "BNBUSDT",
+                float(os.getenv('BNB_PRICE', 0)),
+                float(os.getenv('BNB_AMOUNT', 0))
+            ),
+            CryptoConfig(
+                "SOL", "索拉纳", "SOLUSDT",
+                float(os.getenv('SOL_PRICE', 0)),
+                float(os.getenv('SOL_AMOUNT', 0))
+            ),
+            CryptoConfig(
+                "TON", "TON", "TONUSDT",
+                float(os.getenv('TON_PRICE', 0)),
+                float(os.getenv('TON_AMOUNT', 0))
+            ),
+            CryptoConfig(
+                "DOGE", "狗狗币", "DOGEUSDT",
+                float(os.getenv('DOGE_PRICE', 0)),
+                float(os.getenv('DOGE_AMOUNT', 0))
+            ),
+            CryptoConfig(
+                "SUI", "SUI", "SUIUSDT",
+                float(os.getenv('SUI_PRICE', 0)),
+                float(os.getenv('SUI_AMOUNT', 0))
+            ),
+            CryptoConfig(
+                "ASTER", "ASTER", "ASTERUSDT",
+                float(os.getenv('ASTER_PRICE', 0)),
+                float(os.getenv('ASTER_AMOUNT', 0))
+            ),
+        ]
+        
         self.console = Console()
         self.client = Client()
         self.price_data = {}
         self.last_update_time = ''
         self.initialize_price_data()
+        
+        # 计算总投资
+        self.total_investment = sum(crypto.buy_amount for crypto in self.CRYPTO_PAIRS)
 
     def initialize_price_data(self):
         """初始化价格数据结构"""
@@ -57,7 +99,11 @@ class PriceMonitor:
                 'change_24h': 0,
                 'change_5m': 0,
                 'change_1m': 0,
-                'display_name': crypto.display_name
+                'display_name': crypto.display_name,
+                'buy_price': crypto.buy_price,
+                'buy_amount': crypto.buy_amount,
+                'profit_usdt': 0,
+                'profit_percent': 0
             }
 
     def calculate_change_percent(self, current_price: float, old_price: float) -> float:
@@ -65,6 +111,29 @@ class PriceMonitor:
         if old_price == 0:
             return 0
         return ((current_price - old_price) / old_price) * 100
+
+    def calculate_profit(self, symbol: str, current_price: float) -> tuple:
+        """计算收益"""
+        data = self.price_data[symbol]
+        buy_price = data['buy_price']
+        buy_amount = data['buy_amount']
+        
+        if buy_price == 0 or buy_amount == 0:
+            return 0, 0
+            
+        # 计算买入时的币数量
+        coin_amount = buy_amount / buy_price
+        
+        # 计算当前市值
+        current_value = coin_amount * current_price
+        
+        # 计算收益（USDT）
+        profit_usdt = current_value - buy_amount
+        
+        # 计算收益率
+        profit_percent = (profit_usdt / buy_amount) * 100 if buy_amount > 0 else 0
+        
+        return profit_usdt, profit_percent
 
     def get_klines_change(self, symbol: str) -> None:
         """获取K线数据并计算涨跌幅"""
@@ -108,15 +177,28 @@ class PriceMonitor:
             all_tickers = {t['symbol']: t for t in self.client.get_ticker()}
             
             # 更新每个交易对的数据
+            total_profit = 0
             for symbol in self.price_data.keys():
                 if symbol in all_tickers:
                     ticker = all_tickers[symbol]
+                    current_price = float(ticker['lastPrice'])
+                    
+                    # 计算收益
+                    profit_usdt, profit_percent = self.calculate_profit(symbol, current_price)
+                    total_profit += profit_usdt
+                    
                     self.price_data[symbol].update({
-                        'price': float(ticker['lastPrice']),
-                        'change_24h': float(ticker['priceChangePercent'])
+                        'price': current_price,
+                        'change_24h': float(ticker['priceChangePercent']),
+                        'profit_usdt': profit_usdt,
+                        'profit_percent': profit_percent
                     })
                     # 同步更新K线数据
                     self.get_klines_change(symbol)
+            
+            # 更新总收益率
+            self.total_profit = total_profit
+            self.total_profit_percent = (total_profit / self.total_investment * 100) if self.total_investment > 0 else 0
             
         except Exception as e:
             self.console.print(f"[red]获取数据时发生错误: {str(e)}[/red]")
@@ -146,6 +228,14 @@ class PriceMonitor:
             return f"[red]{change:.2f}%[/red]"
         return f"[white]{change:.2f}%[/white]"
 
+    def format_profit(self, profit: float, percent: float) -> str:
+        """格式化收益显示"""
+        if profit > 0:
+            return f"[green]+{profit:.2f}U ({percent:+.2f}%)[/green]"
+        elif profit < 0:
+            return f"[red]{profit:.2f}U ({percent:+.2f}%)[/red]"
+        return f"[white]{profit:.2f}U ({percent:+.2f}%)[/white]"
+
     def generate_table(self) -> Panel:
         """生成价格表格"""
         table = Table(
@@ -162,6 +252,7 @@ class PriceMonitor:
         table.add_column("24h涨跌", justify="right", width=12)
         table.add_column("5m涨跌", justify="right", width=12)
         table.add_column("1m涨跌", justify="right", width=12)
+        table.add_column("持仓收益", justify="right", width=25)
 
         # 获取排序后的交易对
         sorted_symbols = self.get_sorted_symbols()
@@ -187,13 +278,26 @@ class PriceMonitor:
                 price_str if price > 0 else "[dim]等待数据...[/dim]",
                 self.format_change(data['change_24h']),
                 self.format_change(data['change_5m']),
-                self.format_change(data['change_1m'])
+                self.format_change(data['change_1m']),
+                self.format_profit(data['profit_usdt'], data['profit_percent'])
             )
+        
+        # 添加总收益行
+        table.add_row(
+            "",
+            "[bold]总计",
+            "",
+            "",
+            "",
+            "",
+            self.format_profit(self.total_profit, self.total_profit_percent)
+        )
         
         # 添加底部信息
         info_text = Text()
         info_text.append("\n所有数据每秒更新 | ", style="dim green")
-        info_text.append("按价格降序排列", style="dim yellow")
+        info_text.append("按价格降序排列 | ", style="dim yellow")
+        info_text.append(f"总投资: {self.total_investment:.2f}U", style="dim cyan")
         
         return Panel(
             table,
