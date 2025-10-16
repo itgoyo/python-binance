@@ -7,8 +7,9 @@
 
 import os
 import time
+import subprocess
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from dataclasses import dataclass
 from binance import Client
 from rich.console import Console
@@ -26,10 +27,42 @@ class CryptoConfig:
     usdt_pair: str
     buy_price: float = 0
     buy_amount: float = 0
+    alert_high: float = 0
+    alert_low: float = 0
+    last_alert_price: float = 0  # 用于记录上次提醒时的价格
+    last_price: float = 0  # 用于记录上次价格，计算趋势
 
     def __post_init__(self):
         if not self.usdt_pair:
             self.usdt_pair = f"{self.symbol}USDT"
+
+def get_trend_arrow(current_price: float, last_price: float) -> Tuple[str, str]:
+    """获取趋势箭头和描述"""
+    if last_price == 0:
+        return "➡️", "持平"
+    
+    percent = ((current_price - last_price) / last_price) * 100
+    if percent > 1:
+        return "⬆️⬆️", f"强势上涨 (+{percent:.2f}%)"
+    elif percent > 0:
+        return "⬆️", f"上涨 (+{percent:.2f}%)"
+    elif percent < -1:
+        return "⬇️⬇️", f"大幅下跌 ({percent:.2f}%)"
+    elif percent < 0:
+        return "⬇️", f"下跌 ({percent:.2f}%)"
+    else:
+        return "➡️", "持平"
+
+def send_notification(title: str, message: str, subtitle: str = ""):
+    """发送 macOS 通知"""
+    try:
+        # 使用带子标题的通知
+        apple_script = f'''
+        display notification "{message}" with title "{title}" subtitle "{subtitle}" sound name "Glass"
+        '''
+        subprocess.run(['osascript', '-e', apple_script], capture_output=True)
+    except Exception:
+        pass
 
 class PriceMonitor:
     """价格监控类"""
@@ -43,42 +76,58 @@ class PriceMonitor:
             CryptoConfig(
                 "BTC", "比特币", "BTCUSDT",
                 float(os.getenv('BTC_PRICE', 0)),
-                float(os.getenv('BTC_AMOUNT', 0))
+                float(os.getenv('BTC_AMOUNT', 0)),
+                float(os.getenv('BTC_ALERT_HIGH', 0)),
+                float(os.getenv('BTC_ALERT_LOW', 0))
             ),
             CryptoConfig(
                 "ETH", "以太坊", "ETHUSDT",
                 float(os.getenv('ETH_PRICE', 0)),
-                float(os.getenv('ETH_AMOUNT', 0))
+                float(os.getenv('ETH_AMOUNT', 0)),
+                float(os.getenv('ETH_ALERT_HIGH', 0)),
+                float(os.getenv('ETH_ALERT_LOW', 0))
             ),
             CryptoConfig(
                 "BNB", "币安币", "BNBUSDT",
                 float(os.getenv('BNB_PRICE', 0)),
-                float(os.getenv('BNB_AMOUNT', 0))
+                float(os.getenv('BNB_AMOUNT', 0)),
+                float(os.getenv('BNB_ALERT_HIGH', 0)),
+                float(os.getenv('BNB_ALERT_LOW', 0))
             ),
             CryptoConfig(
                 "SOL", "索拉纳", "SOLUSDT",
                 float(os.getenv('SOL_PRICE', 0)),
-                float(os.getenv('SOL_AMOUNT', 0))
+                float(os.getenv('SOL_AMOUNT', 0)),
+                float(os.getenv('SOL_ALERT_HIGH', 0)),
+                float(os.getenv('SOL_ALERT_LOW', 0))
             ),
             CryptoConfig(
                 "TON", "TON", "TONUSDT",
                 float(os.getenv('TON_PRICE', 0)),
-                float(os.getenv('TON_AMOUNT', 0))
+                float(os.getenv('TON_AMOUNT', 0)),
+                float(os.getenv('TON_ALERT_HIGH', 0)),
+                float(os.getenv('TON_ALERT_LOW', 0))
             ),
             CryptoConfig(
                 "DOGE", "狗狗币", "DOGEUSDT",
                 float(os.getenv('DOGE_PRICE', 0)),
-                float(os.getenv('DOGE_AMOUNT', 0))
+                float(os.getenv('DOGE_AMOUNT', 0)),
+                float(os.getenv('DOGE_ALERT_HIGH', 0)),
+                float(os.getenv('DOGE_ALERT_LOW', 0))
             ),
             CryptoConfig(
                 "SUI", "SUI", "SUIUSDT",
                 float(os.getenv('SUI_PRICE', 0)),
-                float(os.getenv('SUI_AMOUNT', 0))
+                float(os.getenv('SUI_AMOUNT', 0)),
+                float(os.getenv('SUI_ALERT_HIGH', 0)),
+                float(os.getenv('SUI_ALERT_LOW', 0))
             ),
             CryptoConfig(
                 "ASTER", "ASTER", "ASTERUSDT",
                 float(os.getenv('ASTER_PRICE', 0)),
-                float(os.getenv('ASTER_AMOUNT', 0))
+                float(os.getenv('ASTER_AMOUNT', 0)),
+                float(os.getenv('ASTER_ALERT_HIGH', 0)),
+                float(os.getenv('ASTER_ALERT_LOW', 0))
             ),
         ]
         
@@ -96,6 +145,7 @@ class PriceMonitor:
         for crypto in self.CRYPTO_PAIRS:
             self.price_data[crypto.usdt_pair] = {
                 'price': 0,
+                'last_price': 0,  # 添加上次价格记录
                 'change_24h': 0,
                 'change_5m': 0,
                 'change_1m': 0,
@@ -103,8 +153,49 @@ class PriceMonitor:
                 'buy_price': crypto.buy_price,
                 'buy_amount': crypto.buy_amount,
                 'profit_usdt': 0,
-                'profit_percent': 0
+                'profit_percent': 0,
+                'alert_high': crypto.alert_high,
+                'alert_low': crypto.alert_low,
+                'last_alert_price': 0
             }
+
+    def check_price_alerts(self, symbol: str, current_price: float) -> None:
+        """检查价格是否触发提醒"""
+        data = self.price_data[symbol]
+        alert_high = data['alert_high']
+        alert_low = data['alert_low']
+        last_alert_price = data['last_alert_price']
+        last_price = data['last_price']
+        display_name = data['display_name']
+
+        # 获取趋势箭头和描述
+        trend_arrow, trend_desc = get_trend_arrow(current_price, last_price)
+        
+        # 构建通知标题和消息
+        def build_alert_message(price_type: str, threshold: float) -> tuple:
+            change_percent = ((current_price - last_price) / last_price * 100) if last_price > 0 else 0
+            title = f"{display_name} {trend_arrow} {price_type}"
+            subtitle = trend_desc
+            message = (
+                f"当前价格: {current_price:.2f} USDT\n"
+                f"目标价位: {threshold:.2f} USDT\n"
+                f"价格变化: {change_percent:+.2f}%"
+            )
+            return title, subtitle, message
+
+        # 避免重复提醒：只在价格首次超过阈值或回落后再次超过时提醒
+        if alert_high > 0 and current_price >= alert_high and (last_alert_price == 0 or last_alert_price < alert_high):
+            title, subtitle, message = build_alert_message("价格突破上限", alert_high)
+            send_notification(title, message, subtitle)
+            data['last_alert_price'] = current_price
+        
+        elif alert_low > 0 and current_price <= alert_low and (last_alert_price == 0 or last_alert_price > alert_low):
+            title, subtitle, message = build_alert_message("价格跌破下限", alert_low)
+            send_notification(title, message, subtitle)
+            data['last_alert_price'] = current_price
+
+        # 更新上次价格
+        data['last_price'] = current_price
 
     def calculate_change_percent(self, current_price: float, old_price: float) -> float:
         """计算价格变化百分比"""
@@ -182,6 +273,9 @@ class PriceMonitor:
                 if symbol in all_tickers:
                     ticker = all_tickers[symbol]
                     current_price = float(ticker['lastPrice'])
+                    
+                    # 检查价格提醒
+                    self.check_price_alerts(symbol, current_price)
                     
                     # 计算收益
                     profit_usdt, profit_percent = self.calculate_profit(symbol, current_price)
