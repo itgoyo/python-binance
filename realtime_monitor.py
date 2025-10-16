@@ -12,11 +12,12 @@ from datetime import datetime
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
 from binance import Client
-from rich.console import Console
+from rich.console import Console, Group
 from rich.table import Table
 from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
+from rich.layout import Layout
 from dotenv import load_dotenv
 
 @dataclass
@@ -31,6 +32,22 @@ class CryptoConfig:
     alert_low: float = 0
     last_alert_price: float = 0  # 用于记录上次提醒时的价格
     last_price: float = 0  # 用于记录上次价格，计算趋势
+
+    def __post_init__(self):
+        if not self.usdt_pair:
+            self.usdt_pair = f"{self.symbol}USDT"
+
+@dataclass
+class FuturesConfig:
+    """合约配置类"""
+    symbol: str
+    display_name: str
+    usdt_pair: str
+    buy_price: float = 0
+    buy_amount: float = 0
+    leverage: int = 1  # 杠杆倍数
+    position_side: str = "LONG"  # LONG 或 SHORT
+    last_price: float = 0
 
     def __post_init__(self):
         if not self.usdt_pair:
@@ -71,7 +88,13 @@ class PriceMonitor:
         # 加载.env文件
         load_dotenv()
         
-        # 配置交易对信息
+        # 配置代理（如果需要）
+        proxies = {
+            'http': os.getenv('HTTP_PROXY', ''),
+            'https': os.getenv('HTTPS_PROXY', '')
+        }
+        
+        # 配置现货交易对信息
         self.CRYPTO_PAIRS = [
             CryptoConfig(
                 "BTC", "比特币", "BTCUSDT",
@@ -131,14 +154,57 @@ class PriceMonitor:
             ),
         ]
         
+        # 配置合约交易对信息
+        self.FUTURES_PAIRS = [
+            FuturesConfig(
+                "BTC", "比特币合约", "BTCUSDT",
+                float(os.getenv('FUTURES_BTC_PRICE', 0)),
+                float(os.getenv('FUTURES_BTC_AMOUNT', 0)),
+                int(os.getenv('FUTURES_BTC_LEVERAGE', 1)),
+                os.getenv('FUTURES_BTC_SIDE', 'LONG')
+            ),
+            FuturesConfig(
+                "ETH", "以太坊合约", "ETHUSDT",
+                float(os.getenv('FUTURES_ETH_PRICE', 0)),
+                float(os.getenv('FUTURES_ETH_AMOUNT', 0)),
+                int(os.getenv('FUTURES_ETH_LEVERAGE', 1)),
+                os.getenv('FUTURES_ETH_SIDE', 'LONG')
+            ),
+            FuturesConfig(
+                "BNB", "币安币合约", "BNBUSDT",
+                float(os.getenv('FUTURES_BNB_PRICE', 0)),
+                float(os.getenv('FUTURES_BNB_AMOUNT', 0)),
+                int(os.getenv('FUTURES_BNB_LEVERAGE', 1)),
+                os.getenv('FUTURES_BNB_SIDE', 'LONG')
+            ),
+            FuturesConfig(
+                "SOL", "索拉纳合约", "SOLUSDT",
+                float(os.getenv('FUTURES_SOL_PRICE', 0)),
+                float(os.getenv('FUTURES_SOL_AMOUNT', 0)),
+                int(os.getenv('FUTURES_SOL_LEVERAGE', 1)),
+                os.getenv('FUTURES_SOL_SIDE', 'LONG')
+            ),
+        ]
+        
         self.console = Console()
-        self.client = Client()
+        # 初始化Client，如果设置了代理则使用代理
+        if proxies['http'] or proxies['https']:
+            self.client = Client(
+                requests_params={'proxies': proxies, 'timeout': 10}
+            )
+        else:
+            self.client = Client()
+        
         self.price_data = {}
+        self.futures_data = {}
         self.last_update_time = ''
+        self.last_futures_update_time = ''
         self.initialize_price_data()
+        self.initialize_futures_data()
         
         # 计算总投资
         self.total_investment = sum(crypto.buy_amount for crypto in self.CRYPTO_PAIRS)
+        self.total_futures_investment = sum(futures.buy_amount for futures in self.FUTURES_PAIRS)
 
     def initialize_price_data(self):
         """初始化价格数据结构"""
@@ -157,6 +223,24 @@ class PriceMonitor:
                 'alert_high': crypto.alert_high,
                 'alert_low': crypto.alert_low,
                 'last_alert_price': 0
+            }
+    
+    def initialize_futures_data(self):
+        """初始化合约数据结构"""
+        for futures in self.FUTURES_PAIRS:
+            self.futures_data[futures.usdt_pair] = {
+                'price': 0,
+                'last_price': 0,
+                'change_24h': 0,
+                'funding_rate': 0,  # 资金费率
+                'display_name': futures.display_name,
+                'buy_price': futures.buy_price,
+                'buy_amount': futures.buy_amount,
+                'leverage': futures.leverage,
+                'position_side': futures.position_side,
+                'profit_usdt': 0,
+                'profit_percent': 0,
+                'liquidation_price': 0  # 爆仓价格
             }
 
     def check_price_alerts(self, symbol: str, current_price: float) -> None:
@@ -204,7 +288,7 @@ class PriceMonitor:
         return ((current_price - old_price) / old_price) * 100
 
     def calculate_profit(self, symbol: str, current_price: float) -> tuple:
-        """计算收益"""
+        """计算现货收益"""
         data = self.price_data[symbol]
         buy_price = data['buy_price']
         buy_amount = data['buy_amount']
@@ -225,6 +309,38 @@ class PriceMonitor:
         profit_percent = (profit_usdt / buy_amount) * 100 if buy_amount > 0 else 0
         
         return profit_usdt, profit_percent
+    
+    def calculate_futures_profit(self, symbol: str, current_price: float) -> tuple:
+        """计算合约收益"""
+        data = self.futures_data[symbol]
+        buy_price = data['buy_price']
+        buy_amount = data['buy_amount']
+        leverage = data['leverage']
+        position_side = data['position_side']
+        
+        if buy_price == 0 or buy_amount == 0:
+            return 0, 0, 0
+        
+        # 计算价格变化百分比
+        price_change_percent = ((current_price - buy_price) / buy_price) * 100
+        
+        # 根据持仓方向计算收益
+        if position_side == "SHORT":
+            price_change_percent = -price_change_percent
+        
+        # 计算收益（带杠杆）
+        profit_percent = price_change_percent * leverage
+        profit_usdt = buy_amount * profit_percent / 100
+        
+        # 计算爆仓价格
+        if position_side == "LONG":
+            # 做多爆仓价格 = 开仓价格 * (1 - 1/杠杆)
+            liquidation_price = buy_price * (1 - 0.9 / leverage)
+        else:
+            # 做空爆仓价格 = 开仓价格 * (1 + 1/杠杆)
+            liquidation_price = buy_price * (1 + 0.9 / leverage)
+        
+        return profit_usdt, profit_percent, liquidation_price
 
     def get_klines_change(self, symbol: str) -> None:
         """获取K线数据并计算涨跌幅"""
@@ -296,6 +412,47 @@ class PriceMonitor:
             
         except Exception as e:
             self.console.print(f"[red]获取数据时发生错误: {str(e)}[/red]")
+    
+    def update_futures_data(self) -> None:
+        """更新合约数据"""
+        try:
+            # 记录本次更新的时间戳
+            update_time = datetime.now()
+            self.last_futures_update_time = update_time.strftime('%H:%M:%S.%f')[:-4]
+
+            # 获取合约ticker数据
+            futures_tickers = self.client.futures_symbol_ticker()
+            futures_tickers_dict = {t['symbol']: t for t in futures_tickers}
+            
+            # 获取24h统计数据
+            futures_24h = self.client.futures_ticker()
+            futures_24h_dict = {t['symbol']: t for t in futures_24h}
+            
+            # 更新每个合约交易对的数据
+            total_futures_profit = 0
+            for symbol in self.futures_data.keys():
+                if symbol in futures_tickers_dict and symbol in futures_24h_dict:
+                    current_price = float(futures_tickers_dict[symbol]['price'])
+                    change_24h = float(futures_24h_dict[symbol]['priceChangePercent'])
+                    
+                    # 计算合约收益
+                    profit_usdt, profit_percent, liquidation_price = self.calculate_futures_profit(symbol, current_price)
+                    total_futures_profit += profit_usdt
+                    
+                    self.futures_data[symbol].update({
+                        'price': current_price,
+                        'change_24h': change_24h,
+                        'profit_usdt': profit_usdt,
+                        'profit_percent': profit_percent,
+                        'liquidation_price': liquidation_price
+                    })
+            
+            # 更新总收益率
+            self.total_futures_profit = total_futures_profit
+            self.total_futures_profit_percent = (total_futures_profit / self.total_futures_investment * 100) if self.total_futures_investment > 0 else 0
+            
+        except Exception as e:
+            self.console.print(f"[red]获取合约数据时发生错误: {str(e)}[/red]")
 
     def get_sorted_symbols(self) -> List[str]:
         """获取按价格排序的交易对列表"""
@@ -399,6 +556,105 @@ class PriceMonitor:
             subtitle=info_text,
             subtitle_align="center"
         )
+    
+    def generate_futures_table(self) -> Panel:
+        """生成合约价格表格"""
+        table = Table(
+            show_header=True,
+            header_style="bold magenta",
+            title=f"币安合约实时监控 (更新时间: {self.last_futures_update_time})",
+            title_style="bold yellow"
+        )
+        
+        # 添加表格列
+        table.add_column("排名", style="blue", justify="center", width=6)
+        table.add_column("币种", style="cyan", justify="left", width=12)
+        table.add_column("开仓价格", style="white", justify="right", width=13)
+        table.add_column("当前价格", style="yellow", justify="right", width=13)
+        table.add_column("24h涨跌", justify="right", width=10)
+        table.add_column("杠杆", justify="center", width=6)
+        table.add_column("方向", justify="center", width=8)
+        table.add_column("爆仓价格", justify="right", width=13)
+        table.add_column("持仓收益", justify="right", width=22)
+
+        # 获取按价格排序的合约交易对
+        sorted_futures = sorted(
+            self.futures_data.keys(),
+            key=lambda x: self.futures_data[x]['price'],
+            reverse=True
+        )
+        
+        # 添加行数据
+        for rank, symbol in enumerate(sorted_futures, 1):
+            data = self.futures_data[symbol]
+            price = data['price']
+            
+            # 只显示有持仓的合约
+            if data['buy_amount'] == 0:
+                continue
+            
+            # 设置价格颜色
+            if data['change_24h'] > 0:
+                price_color = "green"
+            elif data['change_24h'] < 0:
+                price_color = "red"
+            else:
+                price_color = "white"
+            
+            price_str = f"[{price_color}]{self.format_price(price)}[/{price_color}]"
+            
+            # 开仓价格显示
+            buy_price_str = f"[white]{self.format_price(data['buy_price'])}[/white]"
+            
+            # 方向显示
+            side_str = "[green]做多[/green]" if data['position_side'] == "LONG" else "[red]做空[/red]"
+            
+            # 爆仓价格显示
+            liquidation_str = f"[red]{self.format_price(data['liquidation_price'])}[/red]"
+            
+            table.add_row(
+                f"#{rank}",
+                f"{symbol[:-4]}",
+                buy_price_str,
+                price_str if price > 0 else "[dim]等待数据...[/dim]",
+                self.format_change(data['change_24h']),
+                f"{data['leverage']}x",
+                side_str,
+                liquidation_str,
+                self.format_profit(data['profit_usdt'], data['profit_percent'])
+            )
+        
+        # 添加总收益行
+        table.add_row(
+            "",
+            "[bold]总计",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            self.format_profit(self.total_futures_profit, self.total_futures_profit_percent)
+        )
+        
+        # 添加底部信息
+        info_text = Text()
+        info_text.append("\n合约数据每2秒更新 | ", style="dim green")
+        info_text.append("按价格降序排列 | ", style="dim yellow")
+        info_text.append(f"总开仓金额(保证金): {self.total_futures_investment:.2f}U", style="dim cyan")
+        
+        return Panel(
+            table,
+            border_style="yellow",
+            subtitle=info_text,
+            subtitle_align="center"
+        )
+
+    def generate_combined_display(self) -> Group:
+        """生成组合显示（现货+合约）"""
+        spot_panel = self.generate_table()
+        futures_panel = self.generate_futures_table()
+        return Group(spot_panel, futures_panel)
 
     def run(self):
         """运行监控程序"""
@@ -407,16 +663,33 @@ class PriceMonitor:
         
         try:
             # 获取初始数据
-            self.console.print("[yellow]正在获取初始数据...[/yellow]")
+            self.console.print("[yellow]正在获取现货初始数据...[/yellow]")
             self.update_price_data()
-            self.console.print("[green]数据获取成功！开始实时监控...[/green]\n")
+            self.console.print("[green]现货数据获取成功！[/green]")
+            
+            self.console.print("[yellow]正在获取合约初始数据...[/yellow]")
+            self.update_futures_data()
+            self.console.print("[green]合约数据获取成功！开始实时监控...[/green]\n")
+            
+            # 合约更新计数器
+            futures_update_counter = 0
             
             # 使用Rich Live显示实时更新的表格
-            with Live(self.generate_table(), refresh_per_second=2, console=self.console) as live:
+            with Live(self.generate_combined_display(), refresh_per_second=2, console=self.console) as live:
                 while True:
                     start_time = time.time()
+                    
+                    # 每秒更新现货数据
                     self.update_price_data()
-                    live.update(self.generate_table())
+                    
+                    # 每2秒更新合约数据
+                    futures_update_counter += 1
+                    if futures_update_counter >= 2:
+                        self.update_futures_data()
+                        futures_update_counter = 0
+                    
+                    # 更新显示
+                    live.update(self.generate_combined_display())
                     
                     # 精确控制更新间隔为1秒
                     elapsed = time.time() - start_time
