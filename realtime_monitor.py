@@ -548,7 +548,18 @@ class PriceMonitor:
         info_text = Text()
         info_text.append("\n所有数据每秒更新 | ", style="dim green")
         info_text.append("按价格降序排列 | ", style="dim yellow")
-        info_text.append(f"总投资: {self.total_investment:.2f}U", style="dim cyan")
+        info_text.append(f"总投资: {self.total_investment:.2f}U | ", style="dim cyan")
+        
+        # 根据收益情况显示不同颜色
+        if self.total_profit > 0:
+            info_text.append(f"总收益: +{self.total_profit:.2f}U | ", style="bold green")
+            info_text.append(f"收益率: +{self.total_profit_percent:.2f}%", style="bold green")
+        elif self.total_profit < 0:
+            info_text.append(f"总收益: {self.total_profit:.2f}U | ", style="bold red")
+            info_text.append(f"收益率: {self.total_profit_percent:.2f}%", style="bold red")
+        else:
+            info_text.append(f"总收益: {self.total_profit:.2f}U | ", style="bold white")
+            info_text.append(f"收益率: {self.total_profit_percent:.2f}%", style="bold white")
         
         return Panel(
             table,
@@ -641,7 +652,18 @@ class PriceMonitor:
         info_text = Text()
         info_text.append("\n合约数据每2秒更新 | ", style="dim green")
         info_text.append("按价格降序排列 | ", style="dim yellow")
-        info_text.append(f"总开仓金额(保证金): {self.total_futures_investment:.2f}U", style="dim cyan")
+        info_text.append(f"总开仓金额(保证金): {self.total_futures_investment:.2f}U | ", style="dim cyan")
+        
+        # 根据收益情况显示不同颜色
+        if self.total_futures_profit > 0:
+            info_text.append(f"总收益: +{self.total_futures_profit:.2f}U | ", style="bold green")
+            info_text.append(f"收益率: +{self.total_futures_profit_percent:.2f}%", style="bold green")
+        elif self.total_futures_profit < 0:
+            info_text.append(f"总收益: {self.total_futures_profit:.2f}U | ", style="bold red")
+            info_text.append(f"收益率: {self.total_futures_profit_percent:.2f}%", style="bold red")
+        else:
+            info_text.append(f"总收益: {self.total_futures_profit:.2f}U | ", style="bold white")
+            info_text.append(f"收益率: {self.total_futures_profit_percent:.2f}%", style="bold white")
         
         return Panel(
             table,
